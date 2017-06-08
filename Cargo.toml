@@ -1,0 +1,6 @@
+[package]
+name = "lock_free_ring"
+version = "0.1.0"
+authors = ["Joshua Lockerman <>"]
+
+[dependencies]
