@@ -11,7 +11,6 @@ use std::{mem, ptr};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[derive(Debug)]
 pub struct Ring<T> {
     data: Box<[DataCell<T>]>,
     //TODO pad
@@ -106,6 +105,16 @@ where T: PtrSized {
     }
 }
 
+impl<T> fmt::Debug for Ring<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        f.debug_struct(&"Ring")
+            .field("read_start", &self.read_start)
+            .field("write_start", &self.write_start)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
 pub unsafe trait PtrSized: Sized {
     fn to_ptr(self) -> *mut () {
         unsafe {
@@ -137,23 +146,16 @@ impl<T> DataCell<T> {
     fn take_at_epoch(&self, load_epoch: usize) -> Result<Option<T>, bool>
     where T: PtrSized {
         unsafe {
-            let cell_val = self.unpacked.load();
-            let is_empty = cell_val.ptr.is_null();
-            let cell_val = cell_val.to_u128();
-            let next_epoch = if is_empty { load_epoch } else { load_epoch + 1 };
-            let replacement = EpochPtr::null_at(next_epoch).to_u128();
-            let res = self.packed.compare_exchange(cell_val, replacement);
+            let nop = EpochPtr::null_at(load_epoch).to_u128();
+            let empty = EpochPtr::null_at(load_epoch).to_u128();
+            let res = self.packed.compare_exchange(empty, nop);
             match res {
-                Ok(..) if is_empty => { Ok(None) },
-                Ok(packed) => {
-                    let ptr = EpochPtr::from_u128(packed).ptr;
-                    if ptr.is_null() { return Ok(None) }
-                    Ok(Some(PtrSized::from_ptr(ptr)))
-                },
+                Ok(..) => Ok(None),
                 Err(curr_val) => {
                     let EpochPtr{mut epoch, ptr} = EpochPtr::from_u128(curr_val);
                     if epoch == load_epoch {
                         if ptr.is_null() { return Ok(None) }
+                        let replacement = EpochPtr::null_at(load_epoch + 1).to_u128();
                         let res = self.packed.compare_exchange(curr_val, replacement);
                         match res {
                             Ok(packed) => {
@@ -167,7 +169,7 @@ impl<T> DataCell<T> {
                         }
                     }
                     Err(epoch > load_epoch)
-                }
+                },
             }
         }
     }
