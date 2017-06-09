@@ -1,5 +1,6 @@
 #![feature(attr_literals)]
 #![feature(core_intrinsics)]
+#![feature(hint_core_should_pause)]
 #![feature(i128_type)]
 #![feature(untagged_unions)]
 #![feature(repr_align)]
@@ -8,7 +9,7 @@ use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::{mem, ptr};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, hint_core_should_pause};
 use std::sync::Arc;
 
 pub struct Ring<T> {
@@ -47,24 +48,22 @@ where T: PtrSized {
         let len = self.data.len();
         let mut writes = self.write_start.load(Ordering::Relaxed);
         'push: loop {
-            for i in 0..len {
-                let writes = writes + i;
-                let epoch = writes / (len as u64) as usize;
-                let loc = writes % (len as u64) as usize;
-                let reput = self.data[loc].put_at_epoch(epoch, data);
-                match reput {
-                    None => {
-                        self.write_start.fetch_add(1, Ordering::Relaxed);
-                        return Ok(())
-                    },
-                    Some((d, keep_going)) => {
-                        if !keep_going {
-                            return Err(d)
-                        }
-                        data = d;
+            let epoch = writes / (len as u64) as usize;
+            let loc = writes % (len as u64) as usize;
+            let reput = self.data[loc].put_at_epoch(epoch, data);
+            match reput {
+                None => {
+                    self.write_start.fetch_add(1, Ordering::Relaxed);
+                    return Ok(())
+                },
+                Some((d, keep_going)) => {
+                    if !keep_going {
+                        return Err(d)
                     }
+                    data = d;
                 }
             }
+            hint_core_should_pause();
             let new_writes = self.write_start.load(Ordering::Relaxed);
             if new_writes == writes {
                 return Err(data)
@@ -77,25 +76,23 @@ where T: PtrSized {
         let len = self.data.len();
         let mut reads = self.read_start.load(Ordering::Relaxed);
         'pop: loop {
-            for i in 0..len {
-                let reads = reads + i;
-                let epoch = reads / (len as u64) as usize;
-                let loc = reads % (len as u64) as usize;
-                let reget = self.data[loc].take_at_epoch(epoch);
-                match reget {
-                    Ok(None) => {
-                        return None
-                    },
-                    Ok(Some(data)) => {
-                        self.read_start.fetch_add(1, Ordering::Relaxed);
-                        return Some(data)
-                    },
-                    Err(false) => {
-                        return None
-                    }
-                    Err(true) => {}
+            let epoch = reads / (len as u64) as usize;
+            let loc = reads % (len as u64) as usize;
+            let reget = self.data[loc].take_at_epoch(epoch);
+            match reget {
+                Ok(None) => {
+                    return None
+                },
+                Ok(Some(data)) => {
+                    self.read_start.fetch_add(1, Ordering::Relaxed);
+                    return Some(data)
+                },
+                Err(false) => {
+                    return None
                 }
+                Err(true) => {}
             }
+            hint_core_should_pause();
             let new_reads = self.read_start.load(Ordering::Relaxed);
             if new_reads == reads {
                 return None
@@ -215,12 +212,6 @@ struct EpochPtr {
 }
 
 impl AtomicEpochPtr {
-    fn load(&self) -> EpochPtr {
-        let epoch = self.epoch.load(Ordering::Relaxed);
-        let ptr = self.ptr.load(Ordering::Relaxed);
-        EpochPtr{epoch, ptr}
-    }
-
     fn null_at(epoch: usize) -> Self {
         AtomicEpochPtr{epoch: AtomicUsize::new(epoch), ptr: AtomicPtr::new(ptr::null_mut())}
     }
@@ -250,6 +241,7 @@ struct AtomicU128 {
 }
 
 impl AtomicU128 {
+    #[inline]
     fn compare_exchange(&self, current: u128, new: u128) -> Result<u128, u128> {
         use std::intrinsics::atomic_cxchg;
         let (val, ok) = unsafe { atomic_cxchg(self.data.get(), current, new) };
